@@ -29,10 +29,11 @@
 - **обнуление** рабочих координат: XY, Z, XYZ (`G10 L20 P0`);
 - **подача джога**: приложение рассчитано на принтер и шлёт 6000 мм/мин, плагин ограничивает её своей подачей
   (по умолчанию 1000 мм/мин).
-- **смещение после Home**: например `2 0 -0.5` или `X2 Z-0.5`. После `$H` из приложения плагин сразу отправляет
-  `G92 X2 Z-0.5`, и запаркованное положение считается этими координатами, а не нулём. Смещение временное:
-  `G92` держится до сброса контроллера, в EEPROM ничего не пишется. Хоминг из консоли или веб-интерфейса cncd
-  смещение не добавляет.
+- **смещение после Home**: например `2 3 -0.5` (все три оси) или `X2 Y3` (только эти). После `$H` из приложения
+  станок отъезжает от точки парковки на это смещение и ставит там рабочий ноль по указанным осям:
+  `G91` → `G0 X2 Y3` → `G0 Z-0.5` → `G90` → `G10 L20 P0 X0 Y0 Z0`. Если Z идёт вверх, он поднимается первым, а
+  если вниз — опускается последним, после XY. Ноль ставится так же, как кнопками «Ноль», и сохраняется в
+  контроллере. Хоминг из консоли или веб-интерфейса cncd этого не делает.
 
 Пока выбрано ЧПУ, Filum прячет всё, что есть только у 3D-принтера: нагрев, обдув, экструдер, CFS, слайсер,
 таймлапсы. Скрываются и кнопки принтерных плагинов.
@@ -99,7 +100,7 @@ A [Filum](https://github.com/fu1se/filum) plugin that adds a GRBL CNC run by [cn
 as a device you select like a printer:
 - **Home tab:** status, job progress, pause / resume / stop, camera.
 - **Control tab:** jog and homing, plus a CNC section with unlock, reset, work-zero buttons, jog feed and an
-  offset after homing (`G92` sent right after `$H`).
+  offset after homing: after `$H` the machine moves by the offset and sets the work zero there.
 - **Files and console:** the Files tab and the console work as usual.
 
 **Requires** Filum 0.2.1+ and cncd with `GET /api/status`.
