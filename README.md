@@ -35,7 +35,7 @@
 
 ## Что нужно
 
-- **Filum 0.3.0** или новее (поддержка драйверов устройств в плагинах).
+- **Filum 0.2.1** или новее (поддержка драйверов устройств в плагинах): [релизы](https://github.com/fu1se/filum/releases).
 - **cncd** с эндпоинтом `GET /api/status`, это
   [cnc-pi](https://github.com/fu1se/cnc-pi) после коммита «GET /api/status». Со старым cncd управление работает,
   но статус и координаты не показываются: плагин попросит обновить cncd.
@@ -97,7 +97,7 @@ as a device you select like a printer:
 - **Control tab:** jog and homing, plus a CNC section with unlock, reset, work-zero buttons and jog feed.
 - **Files and console:** the Files tab and the console work as usual.
 
-**Requires** Filum 0.3.0+ and cncd with `GET /api/status`.
+**Requires** Filum 0.2.1+ and cncd with `GET /api/status`.
 
 **Install.** In Filum go to Plugins → From URL and paste
 `https://raw.githubusercontent.com/fu1se/filum-cnc-pi/main/cnc-pi.js`. Then add a printer with the device type
