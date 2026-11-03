@@ -1,6 +1,6 @@
 // @plugin      cnc-pi
 // @name        ЧПУ (cnc-pi)
-// @version     1.1
+// @version     1.2
 // @author      fu1se
 // @homepage    https://github.com/fu1se/filum-cnc-pi
 // @description Фрезерный станок на GRBL через cncd (github.com/fu1se/cnc-pi) как ещё один «принтер»: добавьте его в списке принтеров с типом «ЧПУ (cnc-pi)». Статус, прогресс, пауза и стоп, джог, Home, файлы и консоль работают через обычный интерфейс Filum; разблокировка, сброс и обнуление — на вкладке «Управление». github.com/fu1se/filum-cnc-pi
@@ -19,6 +19,7 @@ let lastError = ''
 let failures = 0
 let skip = 0
 let camera = null
+let cameraTicks = 0    // камера не найдена — перепроверяем раз в ~30 с
 let feed = filum.storage.get('feed', 1000)   // подача джога, мм/мин (у станка свой предел $110…)
 let section = null
 
@@ -50,6 +51,17 @@ function api(method, path, body, quiet) {
 }
 const post = (path, body) => api('POST', path, body)
 
+/** /api/camera отвечает без поля ok ({available, device…}) — проверяем отдельно от api(). */
+function checkCamera() {
+  try {
+    const r = filum.http.get(url('/api/camera'))
+    const d = r.status === 200 ? JSON.parse(r.body) : null
+    camera = d && d.available ? url('/camera/stream') : null
+  } catch (e) {
+    camera = null
+  }
+}
+
 // ---------- опрос и состояние для приложения ----------
 function grblState() { return st ? (st.state || '').split(':')[0] : '' }
 const jobActive = () => !!(job && job.name && (job.running || job.paused))
@@ -62,6 +74,7 @@ function poll() {
   }
   // старый cncd: связь проверяем по списку файлов, состояние станка неизвестно
   if (!statusApi) api('GET', '/api/files', null, true)
+  if (online && !camera && ++cameraTicks >= 30) { cameraTicks = 0; checkCamera() }
   publish()
 }
 
@@ -145,12 +158,10 @@ filum.device.register({
     const q = a.indexOf('?token=')
     addr = q >= 0 ? a.slice(0, q) : a
     token = q >= 0 ? decodeURIComponent(a.slice(q + 7)) : ''
-    active = true; online = false; statusApi = true; st = null; job = null; failures = 0; skip = 0; camera = null
+    active = true; online = false; statusApi = true; st = null; job = null; failures = 0; skip = 0; camera = null; cameraTicks = 0
     filum.device.log('!', 'ЧПУ: подключение к cncd ' + addr)
     poll()
-    if (!online && !statusApi) poll()
-    const cam = online ? api('GET', '/api/camera', null, true) : null
-    if (cam && cam.available) camera = url('/camera/stream')
+    if (online) checkCamera()
     publish()
   },
 
