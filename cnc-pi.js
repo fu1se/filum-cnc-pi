@@ -1,6 +1,6 @@
 // @plugin      cnc-pi
 // @name        ЧПУ (cnc-pi)
-// @version     1.0
+// @version     1.1
 // @author      fu1se
 // @homepage    https://github.com/fu1se/filum-cnc-pi
 // @description Фрезерный станок на GRBL через cncd (github.com/fu1se/cnc-pi) как ещё один «принтер»: добавьте его в списке принтеров с типом «ЧПУ (cnc-pi)». Статус, прогресс, пауза и стоп, джог, Home, файлы и консоль работают через обычный интерфейс Filum; разблокировка, сброс и обнуление — на вкладке «Управление». github.com/fu1se/filum-cnc-pi
@@ -14,6 +14,7 @@ let active = false     // ЧПУ выбрано в приложении
 let st = null          // state из cncd
 let job = null         // job из cncd
 let online = false
+let statusApi = true   // старый cncd без GET /api/status: управляем, но без координат и статуса
 let lastError = ''
 let failures = 0
 let skip = 0
@@ -35,14 +36,14 @@ function api(method, path, body, quiet) {
   try {
     const r = method === 'GET' ? filum.http.get(url(path)) : filum.http.post(url(path), body || {})
     if (r.status === 401) throw new Error('cncd требует токен: укажите адрес как ip:порт?token=…')
-    if (r.status === 404 && path === '/api/status') throw new Error('обновите cncd: нет GET /api/status')
+    if (r.status === 404 && path === '/api/status') { statusApi = false; return null }
     const d = JSON.parse(r.body)
     if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status))
     online = true; failures = 0; lastError = ''
     return d
   } catch (e) {
     lastError = String(e.message || e)
-    if (path === '/api/status') { online = false; failures++ }
+    if (path === '/api/status' || (!statusApi && path === '/api/files')) { online = false; failures++ }
     if (!quiet) { filum.device.log('!', 'ЧПУ: ' + lastError); filum.ui.toast('ЧПУ: ' + lastError) }
     return null
   }
@@ -55,8 +56,12 @@ const jobActive = () => !!(job && job.name && (job.running || job.paused))
 
 function poll() {
   if (!active) return
-  const d = api('GET', '/api/status', null, true)
-  if (d) { st = d.s; job = d.job }
+  if (statusApi) {
+    const d = api('GET', '/api/status', null, true)
+    if (d) { st = d.s; job = d.job }
+  }
+  // старый cncd: связь проверяем по списку файлов, состояние станка неизвестно
+  if (!statusApi) api('GET', '/api/files', null, true)
   publish()
 }
 
@@ -71,6 +76,9 @@ function publish() {
   const s = { connected: online, state: state, name: 'cncd' }
   if (!online) {
     s.message = 'Нет связи с cncd (' + addr + ')' + (lastError ? ': ' + lastError : '')
+  } else if (!statusApi) {
+    s.status = 'На связи · без координат: обновите cncd (нужен GET /api/status)'
+    s.homed = 'xyz'
   } else if (st) {
     s.status = (STATES[g] || g || '—') + (st.connected ? '' : ' · станок не подключён к Pi')
     if (st.message) s.message = st.message
@@ -98,9 +106,9 @@ filum.every(1000, () => {
 
 // ---------- то, чего нет у принтера: вкладка «Управление» ----------
 const items = () => [
-  { type: 'text', text: online && st
-      ? 'Станок: ' + (STATES[grblState()] || grblState()) + (st.ov ? ' · оверрайды ' + st.ov.join('/') + '%' : '')
-      : 'Нет связи с cncd' },
+  { type: 'text', text: !online ? 'Нет связи с cncd'
+      : !statusApi ? 'Состояние станка недоступно: обновите cncd на Pi (нужен GET /api/status). Управление работает.'
+      : st ? 'Станок: ' + (STATES[grblState()] || grblState()) + (st.ov ? ' · оверрайды ' + st.ov.join('/') + '%' : '') : 'Жду состояние…' },
   { type: 'button', label: 'Разблок. $X', onClick: () => { command('$X'); poll() } },
   { type: 'button', label: '⛔ Сброс', onClick: () => { post('/api/realtime', { name: 'reset' }); poll() } },
   { type: 'text', text: 'Сброс останавливает станок мгновенно, но позиция теряется: потом $X и Home.' },
@@ -137,9 +145,10 @@ filum.device.register({
     const q = a.indexOf('?token=')
     addr = q >= 0 ? a.slice(0, q) : a
     token = q >= 0 ? decodeURIComponent(a.slice(q + 7)) : ''
-    active = true; online = false; st = null; job = null; failures = 0; skip = 0; camera = null
+    active = true; online = false; statusApi = true; st = null; job = null; failures = 0; skip = 0; camera = null
     filum.device.log('!', 'ЧПУ: подключение к cncd ' + addr)
     poll()
+    if (!online && !statusApi) poll()
     const cam = online ? api('GET', '/api/camera', null, true) : null
     if (cam && cam.available) camera = url('/camera/stream')
     publish()
@@ -179,6 +188,7 @@ filum.device.register({
   stop() {
     poll()   // решение — по свежему состоянию станка, а не по прошлому опросу
     if (jobActive()) post('/api/job', { action: 'stop' })
+    else if (!statusApi) { if (!api('POST', '/api/job', { action: 'stop' }, true)) post('/api/realtime', { name: 'reset' }) }
     else post('/api/realtime', { name: 'reset' })
     poll()
   },
