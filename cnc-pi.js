@@ -1,6 +1,6 @@
 // @plugin      cnc-pi
 // @name        ЧПУ (cnc-pi)
-// @version     1.4
+// @version     1.5
 // @author      fu1se
 // @homepage    https://github.com/fu1se/filum-cnc-pi
 // @description Фрезерный станок на GRBL через cncd (github.com/fu1se/cnc-pi) как ещё один «принтер»: добавьте его в списке принтеров с типом «ЧПУ (cnc-pi)». Статус, прогресс, пауза и стоп, джог, Home, файлы и консоль работают через обычный интерфейс Filum; разблокировка, сброс и обнуление — на вкладке «Управление». github.com/fu1se/filum-cnc-pi
@@ -21,10 +21,17 @@ let skip = 0
 let camera = null
 let cameraTicks = 0    // камера не найдена — перепроверяем раз в ~30 с
 let feed = filum.storage.get('feed', 1000)   // подача джога, мм/мин (у станка свой предел $110…)
-// смещение после Home: после $H станок отъезжает от точки парковки на это смещение и ставит там рабочий ноль.
-// {X: 2, Y: 3} — указанные оси (только их и обнуляем); {} — выключено
-let homeOffset = filum.storage.get('homeOffset2', {})
+// после Home ($H) станок отъезжает от точки парковки на смещение {X, Y, Z} и ставит там рабочий ноль XYZ
+// (zeroAfterHome = false — оставить рабочие координаты как были и не отъезжать)
+let homeOffset = loadOffset()
+let zeroAfterHome = filum.storage.get('zeroAfterHome', true)
 let section = null
+const API2 = filum.version >= 2   // Filum 0.2.3+: три поля, неактивные кнопки, подтверждение сброса
+
+function loadOffset() {
+  const o = filum.storage.get('homeOffset3', null) || filum.storage.get('homeOffset2', {}) || {}
+  return { X: +o.X || 0, Y: +o.Y || 0, Z: +o.Z || 0 }
+}
 
 const STATES = { Idle: 'Простой', Run: 'Работа', Hold: 'Пауза', Jog: 'Джог', Alarm: 'АВАРИЯ', Door: 'Дверь открыта',
   Check: 'Проверка G-кода', Home: 'Поиск нуля', Sleep: 'Сон' }
@@ -91,7 +98,7 @@ function publish() {
 
   const s = { connected: online, state: state, name: 'cncd' }
   if (!online) {
-    s.message = 'Нет связи с cncd (' + addr + ')' + (lastError ? ': ' + lastError : '')
+    s.message = 'cncd ' + addr + ' не отвечает' + (lastError && !/failed to connect|timeout|refused/i.test(lastError) ? ': ' + lastError : '')
   } else if (!statusApi) {
     s.status = 'На связи · без координат: обновите cncd (нужен GET /api/status)'
     s.homed = 'xyz'
@@ -121,32 +128,59 @@ filum.every(1000, () => {
 })
 
 // ---------- то, чего нет у принтера: вкладка «Управление» ----------
-const items = () => [
-  { type: 'text', text: !online ? 'Нет связи с cncd'
-      : !statusApi ? 'Состояние станка недоступно: обновите cncd на Pi (нужен GET /api/status). Управление работает.'
-      : st ? 'Станок: ' + (STATES[grblState()] || grblState()) + (st.ov ? ' · оверрайды ' + st.ov.join('/') + '%' : '') : 'Жду состояние…' },
-  { type: 'button', label: 'Разблок. $X', onClick: () => { command('$X'); poll() } },
-  { type: 'button', label: '⛔ Сброс', onClick: () => { post('/api/realtime', { name: 'reset' }); poll() } },
-  { type: 'text', text: 'Сброс останавливает станок мгновенно, но позиция теряется: потом $X и Home.' },
-  { type: 'text', text: 'Обнулить рабочие координаты:' },
-  { type: 'button', label: 'Ноль XY', onClick: () => { post('/api/zero', { axes: ['X', 'Y'] }); poll() } },
-  { type: 'button', label: 'Ноль Z', onClick: () => { post('/api/zero', { axes: ['Z'] }); poll() } },
-  { type: 'button', label: 'Ноль XYZ', onClick: () => { post('/api/zero', { axes: ['X', 'Y', 'Z'] }); poll() } },
-  { type: 'slider', label: 'Подача джога, мм/мин', min: 100, max: 3000, step: 100, value: feed,
-    onChange: v => { feed = Math.round(v); filum.storage.set('feed', feed); showSection() } },
-  { type: 'text', text: offsetText() },
-  { type: 'input', label: 'Смещение после Home: X Y Z, мм', button: 'Сохранить',
-    value: offsetStr(),
-    onSubmit: v => {
-      const o = parseOffset(v)
-      if (!o) return filum.ui.toast('Не понял смещение: напишите «2 3 -0.5» или «X2 Y3»')
-      homeOffset = o
-      filum.storage.set('homeOffset2', o)
-      filum.ui.toast(hasOffset() ? 'После Home: отъезд на ' + offsetStr() + ' и ноль' : 'Смещение выключено')
-      showSection()
-    } },
-  { type: 'text', text: 'Работает для Home из приложения. Отъезд — от точки парковки (G91 G0), ноль — рабочий (G10 L20 P0, как кнопки «Ноль»: сохраняется в контроллере). Обнуляются только указанные оси.' },
-]
+function statusLine() {
+  if (!online) return 'Нет связи с cncd'
+  if (!statusApi) return 'Состояние станка недоступно: обновите cncd на Pi (нужен GET /api/status). Управление работает.'
+  if (!st) return 'Жду состояние…'
+  return 'Станок: ' + (STATES[grblState()] || grblState()) + (st.ov ? ' · оверрайды ' + st.ov.join('/') + '%' : '')
+}
+
+function items() {
+  const on = online
+  const idle = on && !jobActive()          // во время задания ноль и смещение не трогаем
+  const zero = axes => () => { post('/api/zero', { axes: axes }); poll() }
+  const list = [
+    { type: 'text', text: statusLine() },
+    { type: 'text', text: 'Рабочий ноль здесь', style: 'label' },
+    { type: 'button', label: 'Ноль XY', enabled: idle, onClick: zero(['X', 'Y']) },
+    { type: 'button', label: 'Ноль Z', enabled: idle, onClick: zero(['Z']) },
+    { type: 'button', label: 'Ноль XYZ', enabled: idle, onClick: zero(['X', 'Y', 'Z']) },
+    { type: 'slider', label: 'Подача джога, мм/мин', min: 100, max: 3000, step: 100, value: feed,
+      onChange: v => { feed = Math.round(v); filum.storage.set('feed', feed); showSection() } },
+    { type: 'text', text: 'После Home', style: 'label' },
+    { type: 'switch', label: 'Отъехать на смещение и обнулить XYZ', value: zeroAfterHome, enabled: idle || !on,
+      onChange: v => { zeroAfterHome = !!v; filum.storage.set('zeroAfterHome', zeroAfterHome); showSection() } },
+  ]
+  if (API2) {
+    list.push({ type: 'fields', numeric: true, button: 'Сохранить смещение', enabled: zeroAfterHome,
+      fields: AXES.map(a => ({ label: a + ', мм', value: fmtNum(homeOffset[a]) })),
+      onSubmit: v => saveOffset(v) })
+  } else {
+    list.push({ type: 'input', label: 'Смещение X Y Z, мм', button: 'Сохранить', value: AXES.map(a => fmtNum(homeOffset[a])).join(' '),
+      onSubmit: v => saveOffset(String(v).trim().split(/[\s;]+/)) })
+  }
+  list.push({ type: 'text', style: 'hint', text: offsetText() })
+  list.push({ type: 'text', text: 'Авария и сброс', style: 'label' })
+  list.push({ type: 'button', label: 'Разблок. $X', enabled: on, onClick: () => { command('$X'); poll() } })
+  list.push({ type: 'button', label: 'Сброс', enabled: on, style: 'danger',
+    confirm: 'Станок остановится мгновенно, задание прервётся, позиция потеряется — потом нужны $X и Home.',
+    onClick: () => { post('/api/realtime', { name: 'reset' }); poll() } })
+  // старое приложение без подтверждения — хотя бы предупреждение рядом
+  if (!API2) list.push({ type: 'text', text: 'Сброс останавливает станок мгновенно, но позиция теряется: потом $X и Home.' })
+  return list
+}
+
+function saveOffset(values) {
+  const nums = AXES.map((a, i) => {
+    const t = String(values[i] === undefined ? '' : values[i]).trim().replace(',', '.')
+    return t === '' ? 0 : Number(t)
+  })
+  if (nums.some(n => isNaN(n))) return filum.ui.toast('Смещение: нужны числа, например 2, 3, -0.5')
+  homeOffset = { X: nums[0], Y: nums[1], Z: nums[2] }
+  filum.storage.set('homeOffset3', homeOffset)
+  filum.ui.toast('После Home: ' + (hasOffset() ? 'отъезд на ' + offsetStr() + ' и ' : '') + 'ноль XYZ')
+  showSection()
+}
 
 function showSection() {
   if (!active) return
@@ -161,46 +195,31 @@ function hideSection() {
 const fmtNum = v => String(Math.round(v * 1000) / 1000)
 
 const AXES = ['X', 'Y', 'Z']
-const hasOffset = () => AXES.some(a => a in homeOffset)
-const offsetStr = () => AXES.filter(a => a in homeOffset).map(a => a + fmtNum(homeOffset[a])).join(' ')
+const hasOffset = () => AXES.some(a => homeOffset[a] !== 0)
+const offsetStr = () => AXES.filter(a => homeOffset[a] !== 0).map(a => a + fmtNum(homeOffset[a])).join(' ')
 
 /**
- * Команды после $H: отъезд от точки парковки на смещение (G91 G0) и рабочий ноль там (G10 L20 P0) по указанным
- * осям. Z вверх (+) — сначала Z, потом XY; Z вниз (−) — сначала XY, потом Z: фреза не идёт низом над деталью.
+ * Команды после $H: отъезд от точки парковки на смещение (G91 G0) и рабочий ноль XYZ там (G10 L20 P0).
+ * Z вверх (+) — сначала Z, потом XY; Z вниз (−) — сначала XY, потом Z: фреза не идёт низом над деталью.
  */
 function homeOffsetGcode() {
-  if (!hasOffset()) return []
+  if (!zeroAfterHome) return []
   const xy = ['X', 'Y'].filter(a => homeOffset[a]).map(a => a + fmtNum(homeOffset[a])).join(' ')
   const z = homeOffset.Z ? 'Z' + fmtNum(homeOffset.Z) : ''
-  const out = ['G91']
-  if (z && homeOffset.Z > 0) out.push('G0 ' + z)
-  if (xy) out.push('G0 ' + xy)
-  if (z && homeOffset.Z < 0) out.push('G0 ' + z)
-  out.push('G90')
-  out.push('G10 L20 P0 ' + AXES.filter(a => a in homeOffset).map(a => a + '0').join(' '))
+  const out = []
+  // G91 в той же строке: относительный отъезд не зависит от того, что было модальным до Home
+  if (z && homeOffset.Z > 0) out.push('G91 G0 ' + z)
+  if (xy) out.push('G91 G0 ' + xy)
+  if (z && homeOffset.Z < 0) out.push('G91 G0 ' + z)
+  if (xy || z) out.push('G90')
+  out.push('G10 L20 P0 X0 Y0 Z0')
   return out
 }
 
-/** «2 3 -0.5» (все три оси), «X2 Y3» (только эти), «2; 3» → {X, Y, Z…}; пусто → {} (выключено); ошибка → null. */
-function parseOffset(text) {
-  const t = String(text).trim().toUpperCase().replace(/,/g, '.').replace(/;/g, ' ')
-  const out = {}
-  if (!t) return out
-  if (/[XYZ]/.test(t)) {
-    const re = /([XYZ])\s*(-?\d+(\.\d+)?)/g
-    let m, n = 0
-    while ((m = re.exec(t)) !== null) { out[m[1]] = parseFloat(m[2]); n++ }
-    return n ? out : null
-  }
-  const nums = t.split(/\s+/).map(Number)
-  if (nums.length > 3 || nums.some(isNaN)) return null
-  nums.forEach((v, i) => { out[AXES[i]] = v })
-  return out
-}
-
-const offsetText = () => hasOffset()
-  ? 'После Home: отъезд на ' + offsetStr() + ' от точки парковки и ноль ' + AXES.filter(a => a in homeOffset).join('') + ' там.'
-  : 'После Home станок остаётся в точке парковки (смещение не задано).'
+const offsetText = () => !zeroAfterHome
+  ? 'После Home рабочие координаты не меняются.'
+  : hasOffset() ? 'После Home из приложения: отъезд на ' + offsetStr() + ' от точки парковки, там X0 Y0 Z0.'
+  : 'После Home из приложения: X0 Y0 Z0 в точке парковки.'
 
 function command(script) {
   // несколько строк из консоли — по одной; комментарии GRBL не нужны
